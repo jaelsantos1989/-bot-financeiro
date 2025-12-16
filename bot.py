@@ -1,141 +1,194 @@
 from flask import Flask, request
+from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
-import json
-from datetime import datetime
+import sqlite3
+import os
+from datetime import datetime, timedelta
+import requests
 
 app = Flask(__name__)
 
-# Simulando um banco de dados simples em memória
-usuario_dados = {
-    "nome": "Jael",
-    "saldo": 0,
-    "despesas": [],
-    "receitas": [],
-    "metas": []
+# Configurações Twilio
+ACCOUNT_SID = "seu_account_sid_aqui"
+AUTH_TOKEN = "seu_auth_token_aqui"
+client = Client(ACCOUNT_SID, AUTH_TOKEN)
+
+# Banco de dados
+DB_FILE = "gastos.db"
+
+# Categorias (regras simples)
+CATEGORIAS = {
+    "alimentacao": ["mercado", "padaria", "supermercado", "restaurante", "lanche", "pizza", "burger", "comida", "almoço", "café", "açai"],
+    "transporte": ["ônibus", "uber", "gasolina", "táxi", "passagem", "metrô", "carro", "combustível"],
+    "moradia": ["aluguel", "condomínio", "água", "luz", "energia", "gás", "internet", "telefone"],
+    "saude": ["farmácia", "médico", "dentista", "hospital", "remédio", "medicamento"],
+    "lazer": ["cinema", "bar", "show", "jogo", "diversão", "festa", "viagem"],
+    "outros": []
 }
 
-@app.route("/webhook", methods=["POST", "GET"])
-def webhook():
-    if request.method == "GET":
-        return "Bot Financeiro está online! 💰"
+# Inicializar banco de dados
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS gastos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT,
+            valor REAL,
+            categoria TEXT,
+            descricao TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-    # Pega a mensagem que veio do WhatsApp
-    mensagem = request.values.get('Body', '').strip().lower()
+init_db()
+
+# Categorizar automaticamente
+def categorizar(descricao):
+    descricao_lower = descricao.lower()
+    for categoria, palavras in CATEGORIAS.items():
+        for palavra in palavras:
+            if palavra in descricao_lower:
+                return categoria
+    return "outros"
+
+# Extrair valor do texto
+def extrair_valor(texto):
+    import re
+    match = re.search(r'R?\$?\s*(\d+[.,]?\d*)', texto)
+    if match:
+        valor_str = match.group(1).replace(',', '.')
+        return float(valor_str)
+    return None
+
+# Salvar gasto
+def salvar_gasto(valor, categoria, descricao):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    data = datetime.now().strftime("%Y-%m-%d")
+    c.execute('''
+        INSERT INTO gastos (data, valor, categoria, descricao)
+        VALUES (?, ?, ?, ?)
+    ''', (data, valor, categoria, descricao))
+    conn.commit()
+    conn.close()
+
+# Gerar relatório
+def gerar_relatorio(tipo="diario"):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    hoje = datetime.now().strftime("%Y-%m-%d")
+
+    if tipo == "diario":
+        c.execute('''
+            SELECT categoria, SUM(valor) FROM gastos 
+            WHERE data = ? 
+            GROUP BY categoria
+        ''', (hoje,))
+    elif tipo == "semanal":
+        data_inicio = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        c.execute('''
+            SELECT categoria, SUM(valor) FROM gastos 
+            WHERE data >= ? 
+            GROUP BY categoria
+        ''', (data_inicio,))
+    elif tipo == "mensal":
+        mes_ano = hoje[:7]
+        c.execute('''
+            SELECT categoria, SUM(valor) FROM gastos 
+            WHERE data LIKE ? 
+            GROUP BY categoria
+        ''', (mes_ano + '%',))
+
+    resultados = c.fetchall()
+    conn.close()
+
+    if not resultados:
+        return f"Nenhum gasto registrado para este período ({tipo})."
+
+    total = sum(r[1] for r in resultados)
+
+    relatorio = f"📊 Relatório {tipo.upper()}\n\n"
+    for categoria, valor in resultados:
+        emoji_cat = {
+            "alimentacao": "🍔",
+            "transporte": "🚗",
+            "moradia": "🏠",
+            "saude": "⚕️",
+            "lazer": "🎬",
+            "outros": "📦"
+        }
+        emoji = emoji_cat.get(categoria, "💰")
+        relatorio += f"{emoji} {categoria.capitalize()}: R$ {valor:.2f}\n"
+
+    relatorio += f"\n💰 Total: R$ {total:.2f}"
+    return relatorio
+
+# Webhook do WhatsApp
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    incoming_msg = request.values.get('Body', '').strip()
+    sender = request.values.get('From')
 
     resp = MessagingResponse()
-    msg = resp.message()
 
-    # MENU PRINCIPAL
-    if mensagem == "menu":
-        resposta = """
-🤖 *BEM-VINDO AO BOT FINANCEIRO* 💰
+    if incoming_msg.lower() == "menu":
+        resp.message("""
+📱 MENU FINANCEIRO
 
-Escolha uma opção:
+1️⃣ Envie um áudio: "Gastei 45 reais no mercado"
+2️⃣ Relatório diário: "relatório diário"
+3️⃣ Relatório semanal: "relatório semanal"
+4️⃣ Relatório mensal: "relatório mensal"
+5️⃣ Ajuda: "ajuda"
+        """)
 
-1️⃣ *saldo* - Ver seu saldo atual
-2️⃣ *receita [valor]* - Registrar uma receita
-3️⃣ *despesa [valor]* - Registrar uma despesa
-4️⃣ *extrato* - Ver histórico
-5️⃣ *meta [valor]* - Definir uma meta
-6️⃣ *ajuda* - Ver comandos
+    elif "relatório" in incoming_msg.lower():
+        if "semanal" in incoming_msg.lower():
+            relatorio = gerar_relatorio("semanal")
+        elif "mensal" in incoming_msg.lower():
+            relatorio = gerar_relatorio("mensal")
+        else:
+            relatorio = gerar_relatorio("diario")
+        resp.message(relatorio)
 
-Exemplo: "receita 1000" ou "despesa 150"
-        """
-        msg.body(resposta)
+    elif incoming_msg.lower() == "ajuda":
+        resp.message("""
+💡 COMO USAR:
 
-    # VER SALDO
-    elif mensagem == "saldo":
-        saldo = usuario_dados["saldo"]
-        resposta = f"💵 Seu saldo atual: R$ {saldo:.2f}"
-        msg.body(resposta)
+📝 Envie mensagens com seus gastos:
+"Gastei 45 reais no mercado"
+"Paguei 150 na passagem"
+"Gastei 80 na farmácia"
 
-    # REGISTRAR RECEITA
-    elif mensagem.startswith("receita"):
-        try:
-            valor = float(mensagem.split()[1])
-            usuario_dados["saldo"] += valor
-            usuario_dados["receitas"].append({
-                "valor": valor,
-                "data": datetime.now().strftime("%d/%m/%Y %H:%M")
-            })
-            resposta = f"✅ Receita de R$ {valor:.2f} registrada!\n💰 Novo saldo: R$ {usuario_dados['saldo']:.2f}"
-            msg.body(resposta)
-        except:
-            msg.body("❌ Formato inválido. Use: receita 1000")
+📊 Peça relatórios:
+"relatório diário"
+"relatório semanal"
+"relatório mensal"
 
-    # REGISTRAR DESPESA
-    elif mensagem.startswith("despesa"):
-        try:
-            valor = float(mensagem.split()[1])
-            usuario_dados["saldo"] -= valor
-            usuario_dados["despesas"].append({
-                "valor": valor,
-                "data": datetime.now().strftime("%d/%m/%Y %H:%M")
-            })
-            resposta = f"✅ Despesa de R$ {valor:.2f} registrada!\n💰 Novo saldo: R$ {usuario_dados['saldo']:.2f}"
-            msg.body(resposta)
-        except:
-            msg.body("❌ Formato inválido. Use: despesa 150")
+🏷️ Categorias automáticas:
+🍔 Alimentação
+🚗 Transporte
+🏠 Moradia
+⚕️ Saúde
+🎬 Lazer
+📦 Outros
+        """)
 
-    # VER EXTRATO
-    elif mensagem == "extrato":
-        receitas_total = sum([r["valor"] for r in usuario_dados["receitas"]])
-        despesas_total = sum([d["valor"] for d in usuario_dados["despesas"]])
-
-        resposta = f"""
-📊 *EXTRATO FINANCEIRO*
-
-📈 Total de Receitas: R$ {receitas_total:.2f}
-📉 Total de Despesas: R$ {despesas_total:.2f}
-💰 Saldo: R$ {usuario_dados['saldo']:.2f}
-
-Últimas transações:
-"""
-
-        # Últimas 5 transações
-        todas = []
-        for r in usuario_dados["receitas"][-3:]:
-            todas.append(f"✅ +R$ {r['valor']:.2f} ({r['data']})")
-        for d in usuario_dados["despesas"][-3:]:
-            todas.append(f"❌ -R$ {d['valor']:.2f} ({d['data']})")
-
-        resposta += "\n".join(todas) if todas else "Nenhuma transação registrada"
-        msg.body(resposta)
-
-    # DEFINIR META
-    elif mensagem.startswith("meta"):
-        try:
-            valor = float(mensagem.split()[1])
-            usuario_dados["metas"].append(valor)
-            resposta = f"🎯 Meta de R$ {valor:.2f} definida!\nVocê tem {len(usuario_dados['metas'])} meta(s) ativa(s)."
-            msg.body(resposta)
-        except:
-            msg.body("❌ Formato inválido. Use: meta 5000")
-
-    # AJUDA
-    elif mensagem == "ajuda":
-        resposta = """
-📚 *COMANDOS DISPONÍVEIS*
-
-menu - Mostrar este menu
-saldo - Ver saldo atual
-receita [valor] - Adicionar receita
-despesa [valor] - Adicionar despesa
-extrato - Ver histórico
-meta [valor] - Definir meta financeira
-ajuda - Ver esta mensagem
-
-Exemplo: "receita 2000" ou "despesa 500"
-        """
-        msg.body(resposta)
-
-    # MENSAGEM NÃO RECONHECIDA
     else:
-        msg.body("❌ Comando não reconhecido. Digite *menu* para ver as opções.")
+        # Tentar extrair valor e categoria
+        valor = extrair_valor(incoming_msg)
+        if valor:
+            categoria = categorizar(incoming_msg)
+            salvar_gasto(valor, categoria, incoming_msg)
+            resp.message(f"✅ Registrado: R$ {valor:.2f} em {categoria.capitalize()}\n📝 {incoming_msg}")
+        else:
+            resp.message("❓ Comando não reconhecido. Digite 'menu' para ver as opções.")
 
     return str(resp)
 
-if __name__ == "__main__":
-    print("✅ Bot Financeiro COMPLETO rodando em http://127.0.0.1:5000")
-    print("📱 Aguardando mensagens do WhatsApp...")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+if __name__ == '__main__':
+    app.run(debug=False)
