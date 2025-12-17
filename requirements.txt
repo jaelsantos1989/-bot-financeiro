@@ -1,4 +1,6 @@
 flask
 twilio
 gunicorn
-requests
+openai-whisper
+pydub
+ffmpeg-python
