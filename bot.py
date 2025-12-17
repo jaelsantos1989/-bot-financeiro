@@ -8,8 +8,7 @@ import time
 
 app = Flask(__name__)
 
-# Configurações AssemblyAI
-ASSEMBLYAI_API_KEY = "SUA_CHAVE_ASSEMBLYAI_AQUI"
+ASSEMBLYAI_API_KEY = 3768b212b4144481935b9e22d8729396ASSEMBLYAI_API_KEY = "SUA_CHAVE_ASSEMBLYAI_AQUI"
 
 # Banco de dados
 DB_FILE = "gastos.db"
@@ -264,3 +263,4 @@ def webhook():
 
 if __name__ == '__main__':
     app.run(debug=False)
+
