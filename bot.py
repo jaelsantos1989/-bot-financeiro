@@ -4,26 +4,36 @@ import sqlite3
 import os
 from datetime import datetime, timedelta
 import requests
-import time
+import tempfile
+import whisper
+import re
 
 app = Flask(__name__)
 
-ASSEMBLYAI_API_KEY = 3768b212b4144481935b9e22d8729396
+# Configurações Twilio
+ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', 'seu_sid_aqui')
+AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', 'seu_token_aqui')
 
 # Banco de dados
 DB_FILE = "gastos.db"
 
-# Categorias (regras simples)
+# Carregar modelo Whisper (base = rápido e leve)
+try:
+    modelo_whisper = whisper.load_model("base", device="cpu")
+except:
+    modelo_whisper = None
+
+# Categorias
 CATEGORIAS = {
-    "alimentacao": ["mercado", "padaria", "supermercado", "restaurante", "lanche", "pizza", "burger", "comida", "almoço", "jantar", "café", "açaí", "ifood", "delivery"],
-    "transporte": ["ônibus", "uber", "gasolina", "táxi", "passagem", "metrô", "carro", "combustível", "posto", "99", "cabify"],
-    "moradia": ["aluguel", "condomínio", "água", "luz", "energia", "gás", "internet", "telefone", "celular"],
+    "alimentacao": ["mercado", "padaria", "supermercado", "restaurante", "lanche", "pizza", "burger", "comida", "almoço", "jantar", "café", "açai", "ifood", "delivery", "pão"],
+    "transporte": ["ônibus", "uber", "gasolina", "táxi", "passagem", "metrô", "carro", "combustível", "99", "posto", "passagem"],
+    "moradia": ["aluguel", "condomínio", "água", "luz", "energia", "gás", "internet", "telefone", "conta", "conta de luz"],
     "saude": ["farmácia", "médico", "dentista", "hospital", "remédio", "medicamento", "consulta", "exame"],
-    "lazer": ["cinema", "bar", "show", "jogo", "diversão", "festa", "viagem", "passeio"],
+    "lazer": ["cinema", "bar", "show", "jogo", "diversão", "festa", "viagem", "cerveja", "bebida"],
     "outros": []
 }
 
-# Inicializar banco de dados
+# Inicializar banco
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -43,54 +53,36 @@ def init_db():
 
 init_db()
 
-# Transcrever áudio com AssemblyAI
+# Transcrever áudio com Whisper
 def transcrever_audio(url_audio):
     try:
-        # 1. Upload do áudio
-        headers = {"authorization": ASSEMBLYAI_API_KEY}
+        # Baixar áudio da Twilio
+        response = requests.get(url_audio, auth=(ACCOUNT_SID, AUTH_TOKEN), timeout=30)
 
-        # Baixar o áudio da Twilio
-        audio_data = requests.get(url_audio).content
+        if response.status_code != 200:
+            return "Erro ao baixar áudio"
 
-        # Upload para AssemblyAI
-        upload_response = requests.post(
-            "https://api.assemblyai.com/v2/upload",
-            headers=headers,
-            data=audio_data
-        )
-        audio_url = upload_response.json()["upload_url"]
+        # Salvar em arquivo temporário
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_file:
+            tmp_file.write(response.content)
+            tmp_path = tmp_file.name
 
-        # 2. Solicitar transcrição
-        transcript_request = {
-            "audio_url": audio_url,
-            "language_code": "pt"
-        }
-        transcript_response = requests.post(
-            "https://api.assemblyai.com/v2/transcript",
-            json=transcript_request,
-            headers=headers
-        )
-        transcript_id = transcript_response.json()["id"]
+        # Transcrever com Whisper
+        if modelo_whisper:
+            resultado = modelo_whisper.transcribe(tmp_path, language="pt")
+            texto = resultado["text"].strip()
+        else:
+            texto = "Modelo não carregado"
 
-        # 3. Aguardar conclusão
-        while True:
-            transcript_result = requests.get(
-                f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-                headers=headers
-            )
-            status = transcript_result.json()["status"]
+        # Limpar arquivo temporário
+        os.remove(tmp_path)
 
-            if status == "completed":
-                return transcript_result.json()["text"]
-            elif status == "error":
-                return "Erro na transcrição"
-
-            time.sleep(2)
+        return texto
 
     except Exception as e:
-        return f"Erro: {str(e)}"
+        return f"Erro na transcrição: {str(e)}"
 
-# Categorizar automaticamente
+# Categorizar
 def categorizar(descricao):
     descricao_lower = descricao.lower()
     for categoria, palavras in CATEGORIAS.items():
@@ -99,10 +91,8 @@ def categorizar(descricao):
                 return categoria
     return "outros"
 
-# Extrair valor do texto
+# Extrair valor
 def extrair_valor(texto):
-    import re
-    # Procura padrões: "45", "45,50", "R$ 45", "45 reais"
     match = re.search(r'R?\$?\s*(\d+[.,]?\d*)\s*(?:reais?)?', texto, re.IGNORECASE)
     if match:
         valor_str = match.group(1).replace(',', '.')
@@ -173,7 +163,7 @@ def gerar_relatorio(tipo="diario", telefone=None):
     relatorio += f"\n💰 Total: R$ {total:.2f}"
     return relatorio
 
-# Webhook do WhatsApp
+# Webhook
 @app.route('/webhook', methods=['POST'])
 def webhook():
     incoming_msg = request.values.get('Body', '').strip()
@@ -188,7 +178,7 @@ def webhook():
         media_type = request.values.get('MediaContentType0')
 
         if 'audio' in media_type or 'ogg' in media_type:
-            resp.message("🎤 Áudio recebido! Processando...")
+            resp.message("🎤 Áudio recebido! Transcrevendo...")
 
             # Transcrever
             texto_transcrito = transcrever_audio(media_url)
@@ -196,12 +186,12 @@ def webhook():
             # Extrair valor
             valor = extrair_valor(texto_transcrito)
 
-            if valor:
+            if valor and valor > 0:
                 categoria = categorizar(texto_transcrito)
                 salvar_gasto(valor, categoria, texto_transcrito, sender)
                 resp.message(f"✅ Registrado: R$ {valor:.2f} em {categoria.capitalize()}\n📝 \"{texto_transcrito}\"")
             else:
-                resp.message(f"❌ Não consegui identificar o valor.\n\n📝 Transcrição: \"{texto_transcrito}\"\n\nTente falar mais claro: 'Gastei 45 reais no mercado'")
+                resp.message(f"❌ Não consegui identificar o valor.\n\n📝 Transcrição: \"{texto_transcrito}\"\n\nTente falar: 'Gastei 45 reais no mercado'")
         else:
             resp.message("❌ Por favor, envie um áudio.")
 
@@ -250,9 +240,8 @@ def webhook():
         """)
 
     else:
-        # Tentar extrair valor do texto
         valor = extrair_valor(incoming_msg)
-        if valor:
+        if valor and valor > 0:
             categoria = categorizar(incoming_msg)
             salvar_gasto(valor, categoria, incoming_msg, sender)
             resp.message(f"✅ Registrado: R$ {valor:.2f} em {categoria.capitalize()}\n📝 {incoming_msg}")
@@ -262,5 +251,5 @@ def webhook():
     return str(resp)
 
 if __name__ == '__main__':
-    app.run(debug=False)
-
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
