@@ -2,3 +2,5 @@ flask
 twilio
 gunicorn
 requests
+google-cloud-speech
+google-auth
