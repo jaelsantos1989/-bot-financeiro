@@ -1,54 +1,40 @@
-import requests
-import time
-import os
+@app.post("/webhook")
+def webhook():
+    from twilio.twiml.messaging_response import MessagingResponse
 
-ASSEMBLYAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
+    incoming_msg = request.values.get('Body', '').strip().lower()
+    resp = MessagingResponse()
+    msg = resp.message()
 
-def transcrever_audio(url_audio):
-    headers = {"authorization": ASSEMBLYAI_API_KEY}
+    # 1️⃣ PRIMEIRO: Verifica comandos
+    if incoming_msg in ["menu", "menü"]:
+        msg.body("""📋 *MENU DE COMANDOS*
 
-    # Baixar áudio da Twilio com autenticação
-    from requests.auth import HTTPBasicAuth
-    twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID")
-    twilio_token = os.environ.get("TWILIO_AUTH_TOKEN")
+1️⃣ Registrar gasto:
+   "Gastei [valor] reais em [descrição]"
+   Exemplo: Gastei 50 reais no mercado
 
-    audio_resp = requests.get(url_audio, auth=HTTPBasicAuth(twilio_sid, twilio_token))
-    if audio_resp.status_code != 200:
-        return f"Erro ao baixar áudio: {audio_resp.status_code}"
+2️⃣ Ver total gasto:
+   "Quanto gastei?"
 
-    # Upload para AssemblyAI
-    up = requests.post(
-        "https://api.assemblyai.com/v2/upload",
-        headers=headers,
-        data=audio_resp.content
-    )
-    if up.status_code != 200:
-        return f"Erro no upload: {up.text}"
+3️⃣ Ver este menu:
+   "Menu"
+        """)
+        return str(resp)
 
-    audio_url = up.json()["upload_url"]
+    elif "quanto gastei" in incoming_msg:
+        # Aqui você busca o total (use sua função atual)
+        total = buscar_total_gastos()
+        msg.body(f"💰 Você gastou R$ {total:.2f} até agora.")
+        return str(resp)
 
-    # Criar transcrição
-    tr = requests.post(
-        "https://api.assemblyai.com/v2/transcript",
-        headers=headers,
-        json={"audio_url": audio_url, "language_code": "pt"}
-    )
-    if tr.status_code != 200:
-        return f"Erro ao criar transcrição: {tr.text}"
+    # 2️⃣ DEPOIS: Tenta detectar gasto
+    elif detectar_gasto(incoming_msg):
+        registrar_gasto(incoming_msg)
+        msg.body("✅ Gasto registrado com sucesso!")
+        return str(resp)
 
-    tid = tr.json()["id"]
-
-    # Polling até completar (máx ~40s)
-    for _ in range(20):
-        res = requests.get(
-            f"https://api.assemblyai.com/v2/transcript/{tid}",
-            headers=headers
-        )
-        data = res.json()
-        if data["status"] == "completed":
-            return data["text"]
-        if data["status"] == "error":
-            return f"Erro na transcrição: {data.get('error')}"
-        time.sleep(2)
-
-    return "Transcrição demorou demais"
+    # 3️⃣ Se nada funcionar
+    else:
+        msg.body("❓ Comando não reconhecido. Digite 'menu' para ver as opções.")
+        return str(resp)
