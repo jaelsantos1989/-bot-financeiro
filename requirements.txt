@@ -1,6 +1,3 @@
-flask
-twilio
-gunicorn
-requests
-google-cloud-speech
-google-auth
+Flask==2.3.0
+twilio==8.10.0
+python-dotenv==1.0.0
